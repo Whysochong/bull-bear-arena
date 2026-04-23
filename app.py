@@ -60,14 +60,53 @@ def render_form() -> None:
         st.rerun()
 
 
+def render_running() -> None:
+    ticker = st.session_state._pending_ticker
+    notes = st.session_state._pending_notes
+    st.header(f"⚔️ Debating {ticker}")
+
+    progress_bar = st.progress(0.0, text="Starting…")
+    with st.status("Running 15-agent pipeline…", expanded=True) as status:
+        live_text = st.empty()
+        try:
+            for event in agents.run_debate(ticker, notes=notes):
+                if event["type"] == "agent_start":
+                    st.write(f"**{event['step']}/{event['total']}** — {event['label']}")
+                    progress_bar.progress(
+                        (event["step"] - 1) / event["total"],
+                        text=event["label"],
+                    )
+                elif event["type"] == "agent_complete":
+                    progress_bar.progress(
+                        event["step"] / event["total"],
+                        text=f"{event['step']}/{event['total']} done",
+                    )
+                    live_text.markdown(f"> {event['text'][:400]}…" if len(event["text"]) > 400 else f"> {event['text']}")
+                elif event["type"] == "debate_complete":
+                    debate = event["debate"]
+                    storage.save_debate(debate)
+                    st.session_state.debate = debate
+                    st.session_state.phase = "done"
+            status.update(label="Debate complete.", state="complete")
+        except agents.AgentError as e:
+            st.session_state.error = str(e)
+            st.session_state.phase = "idle"
+            status.update(label=f"Failed: {e}", state="error")
+
+    st.rerun()
+
+
 def main() -> None:
     _startup_check()
     _init_session_state()
 
     if st.session_state.phase == "idle":
+        if st.session_state.error:
+            st.error(st.session_state.error)
+            st.session_state.error = None
         render_form()
     elif st.session_state.phase == "running":
-        st.info(f"Running debate for {st.session_state._pending_ticker}… (wired up in the next task)")
+        render_running()
     else:
         st.info("Results panel wired up in the next task.")
 
