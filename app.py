@@ -203,9 +203,47 @@ def render_result(debate: dict) -> None:
         st.rerun()
 
 
+def _load_debate_from_path(path) -> None:
+    debate = storage.load_debate(path)
+    st.session_state.debate = debate
+    st.session_state.phase = "done"
+
+
+def render_sidebar() -> None:
+    with st.sidebar:
+        st.header("Past debates")
+        entries = storage.list_debates()
+        if not entries:
+            st.caption("No debates yet. Run one from the form.")
+        else:
+            for entry in entries:
+                ts = entry["timestamp"][:16].replace("T", " ")
+                label = f"{entry['ticker']} · {ts} · {entry['winner']} {entry['verdict']}"
+                if entry.get("expectedValue") is not None:
+                    label += f" · ${entry['expectedValue']:.0f}"
+                if st.button(label, key=f"load-{entry['path']}"):
+                    _load_debate_from_path(entry["path"])
+                    st.rerun()
+
+            st.divider()
+            if st.button("🗑️ Clear history"):
+                st.session_state._confirm_clear = True
+            if st.session_state.get("_confirm_clear"):
+                st.warning("Delete every saved debate?")
+                c1, c2 = st.columns(2)
+                if c1.button("Yes, delete"):
+                    storage.clear_debates()
+                    st.session_state._confirm_clear = False
+                    st.rerun()
+                if c2.button("Cancel"):
+                    st.session_state._confirm_clear = False
+                    st.rerun()
+
+
 def main() -> None:
     _startup_check()
     _init_session_state()
+    render_sidebar()
 
     if st.session_state.phase == "idle":
         if st.session_state.error:
