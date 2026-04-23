@@ -68,5 +68,5 @@ def run_agent(
 
     result = payload.get("result")
     if not isinstance(result, str):
-        raise AgentError(f"claude -p output missing 'result' string: {payload!r}")
+        raise AgentError(f"claude -p output missing 'result' string: {repr(payload)[:300]}")
     return result

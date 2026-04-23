@@ -1,4 +1,5 @@
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 import agents
@@ -59,8 +60,10 @@ def test_run_agent_runs_from_clean_cwd(mock_run):
     agents.run_agent("sys", "user")
     kwargs = mock_run.call_args.kwargs
     assert "cwd" in kwargs
-    # Must not be a path under the user's home (where CLAUDE.md lives)
-    assert not str(kwargs["cwd"]).startswith("/Users/") or "/tmp" in str(kwargs["cwd"])
+    cwd = str(kwargs["cwd"])
+    home = os.path.expanduser("~")
+    # Real invariant: cwd is outside $HOME so claude won't walk up into ~/CLAUDE.md
+    assert not cwd.startswith(home), f"cwd {cwd} is inside HOME — CLAUDE.md ancestor walk will pick it up"
 
 
 @patch("agents.subprocess.run")
