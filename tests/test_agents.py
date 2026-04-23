@@ -139,3 +139,130 @@ def test_run_structured_agent_raises_on_unparseable_result(mock_run):
         pass
     else:
         raise AssertionError("expected AgentError")
+
+
+AGENT_SEQUENCE = [
+    "researcher",
+    "bull_fundamentals", "bull_growth", "bull_macro",
+    "bull_moat", "bull_capital", "bull_technicals",
+    "bear_risk", "bear_valuation", "bear_headwinds",
+    "bear_disruption", "bear_accounting", "bear_technicals",
+    "judge", "price_target",
+]
+
+
+@patch("agents.run_structured_agent")
+@patch("agents.run_agent")
+def test_run_debate_emits_all_events_in_order(mock_text, mock_struct):
+    mock_text.return_value = "stub analysis"
+    mock_struct.side_effect = [
+        {"clashPoints": [], "winner": "BULL", "verdict": 7, "summary": "ok"},
+        {
+            "currentPrice": 100.0,
+            "bullCase": {"price": 120, "probability": 0.3, "reasoning": "r1"},
+            "baseCase": {"price": 110, "probability": 0.5, "reasoning": "r2"},
+            "bearCase": {"price": 90,  "probability": 0.2, "reasoning": "r3"},
+            "expectedValue": 109.0,
+            "timeHorizon": "12 months",
+            "methodology": "multiples",
+        },
+    ]
+
+    events = list(agents.run_debate("AAPL", notes=""))
+    starts = [e for e in events if e["type"] == "agent_start"]
+    completes = [e for e in events if e["type"] == "agent_complete"]
+    finals = [e for e in events if e["type"] == "debate_complete"]
+
+    assert [e["key"] for e in starts] == AGENT_SEQUENCE
+    assert [e["key"] for e in completes] == AGENT_SEQUENCE
+    assert len(finals) == 1
+    # Progress counters are 1-indexed and span 1..15
+    assert [e["step"] for e in starts] == list(range(1, 16))
+    assert all(e["total"] == 15 for e in starts)
+
+
+@patch("agents.run_structured_agent")
+@patch("agents.run_agent")
+def test_run_debate_feeds_researcher_into_sub_agents(mock_text, mock_struct):
+    mock_text.side_effect = lambda system, user, **kw: (
+        "Current price: $180. RESEARCHER_OUTPUT" if "research" in system.lower()
+        else f"PROMPT_CONTAINED:{int('RESEARCHER_OUTPUT' in user)}"
+    )
+    mock_struct.side_effect = [
+        {"clashPoints": [], "winner": "BULL", "verdict": 7, "summary": "ok"},
+        {
+            "currentPrice": 180.0,
+            "bullCase": {"price": 200, "probability": 0.3, "reasoning": "r"},
+            "baseCase": {"price": 190, "probability": 0.5, "reasoning": "r"},
+            "bearCase": {"price": 170, "probability": 0.2, "reasoning": "r"},
+            "expectedValue": 189.0,
+            "timeHorizon": "12 months",
+            "methodology": "m",
+        },
+    ]
+
+    events = list(agents.run_debate("AAPL", notes=""))
+    completes = {e["key"]: e["text"] for e in events if e["type"] == "agent_complete"}
+    # Every non-researcher text agent must have seen the researcher output in its prompt
+    for key in AGENT_SEQUENCE[1:13]:  # 12 specialists
+        assert completes[key] == "PROMPT_CONTAINED:1", f"{key} did not receive researcher context"
+
+
+@patch("agents.run_structured_agent")
+@patch("agents.run_agent")
+def test_run_debate_assembles_data_model(mock_text, mock_struct):
+    mock_text.return_value = "stub"
+    clash = {"clashPoints": [], "winner": "BEAR", "verdict": 3, "summary": "s"}
+    pt = {
+        "currentPrice": 50.0,
+        "bullCase": {"price": 60, "probability": 0.3, "reasoning": "r"},
+        "baseCase": {"price": 55, "probability": 0.5, "reasoning": "r"},
+        "bearCase": {"price": 40, "probability": 0.2, "reasoning": "r"},
+        "expectedValue": 53.5,
+        "timeHorizon": "12 months",
+        "methodology": "m",
+    }
+    mock_struct.side_effect = [clash, pt]
+
+    events = list(agents.run_debate("TSLA", notes="heads up: earnings next week"))
+    final = [e for e in events if e["type"] == "debate_complete"][0]["debate"]
+
+    assert final["ticker"] == "TSLA"
+    assert final["notes"] == "heads up: earnings next week"
+    assert final["researcher"] == "stub"
+    assert set(final["bull"].keys()) == {
+        "fundamentals", "growth", "macro", "moat", "capital", "technicals"
+    }
+    assert set(final["bear"].keys()) == {
+        "risk", "valuation", "headwinds", "disruption", "accounting", "technicals"
+    }
+    assert final["clash"] == clash
+    assert final["priceTarget"] == pt
+    # timestamp is ISO-8601 string
+    assert "T" in final["timestamp"]
+
+
+@patch("agents.run_structured_agent")
+@patch("agents.run_agent")
+def test_run_debate_survives_researcher_failure(mock_text, mock_struct):
+    def flaky_text(system, user, **kw):
+        if "research" in system.lower():
+            raise agents.AgentError("WebSearch unavailable")
+        return "analyst stub"
+    mock_text.side_effect = flaky_text
+    mock_struct.side_effect = [
+        {"clashPoints": [], "winner": "BULL", "verdict": 7, "summary": "ok"},
+        {
+            "currentPrice": 0,
+            "bullCase": {"price": 10, "probability": 0.3, "reasoning": "r"},
+            "baseCase": {"price": 5, "probability": 0.5, "reasoning": "r"},
+            "bearCase": {"price": 1, "probability": 0.2, "reasoning": "r"},
+            "expectedValue": 4.7,
+            "timeHorizon": "12 months",
+            "methodology": "m",
+        },
+    ]
+
+    events = list(agents.run_debate("NVDA", notes=""))
+    final = [e for e in events if e["type"] == "debate_complete"][0]["debate"]
+    assert final["researcher"].startswith("n/a")
