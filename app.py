@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 import shutil
 
@@ -12,6 +13,18 @@ import storage
 
 
 st.set_page_config(page_title="Bull vs Bear Arena", page_icon="⚔️", layout="wide")
+
+
+def _md_safe(text: str) -> str:
+    """Escape `$` so Streamlit's markdown engine doesn't render it as LaTeX math.
+
+    Every piece of user-supplied (i.e. agent-generated) text that gets passed
+    to st.markdown / st.write must go through this, otherwise paired `$`s in
+    prices and URLs get italicised into math-mode gibberish.
+    """
+    if not text:
+        return ""
+    return text.replace("$", r"\$")
 
 
 def _startup_check() -> None:
@@ -156,7 +169,7 @@ def render_running() -> None:
                     event["text"][:400] + "…"
                     if len(event["text"]) > 400 else event["text"]
                 )
-                live_text.markdown(f"**{event['key']}**\n\n> {preview}")
+                live_text.markdown(f"**{event['key']}**\n\n> {_md_safe(preview)}")
             elif event["type"] == "debate_complete":
                 debate = event["debate"]
                 storage.save_debate(debate)
@@ -200,12 +213,12 @@ def _upside_pct(current: float | None, target: float | None) -> str:
 def _render_verdict(clash: dict) -> None:
     winner = clash.get("winner", "?")
     verdict = clash.get("verdict", "?")
-    summary = clash.get("summary", "")
+    summary = html.escape(clash.get("summary", ""))
     color = "#00e676" if winner == "BULL" else "#ff5252"
     st.markdown(
         f"<div style='padding:16px;border-radius:12px;background:{color}20;"
         f"border:1px solid {color}'>"
-        f"<h2 style='margin:0;color:{color}'>{winner} · {verdict}/10</h2>"
+        f"<h2 style='margin:0;color:{color}'>{html.escape(str(winner))} · {html.escape(str(verdict))}/10</h2>"
         f"<p style='margin:8px 0 0'>{summary}</p>"
         f"</div>",
         unsafe_allow_html=True,
@@ -231,21 +244,24 @@ def _render_price_target(pt: dict) -> None:
         )
 
     with st.expander("Price target methodology & scenarios"):
-        st.write(f"**Methodology:** {pt.get('methodology', '')}")
-        st.write(f"**Horizon:** {pt.get('timeHorizon', '')}")
+        st.markdown(f"**Methodology:** {_md_safe(pt.get('methodology', ''))}")
+        st.markdown(f"**Horizon:** {_md_safe(pt.get('timeHorizon', ''))}")
         for label, key in (("Bull case", "bullCase"), ("Base case", "baseCase"), ("Bear case", "bearCase")):
             case = pt.get(key, {})
             prob = case.get("probability", 0) * 100
-            st.write(f"**{label}:** ${case.get('price', 0):.2f} · {prob:.0f}% prob · {case.get('reasoning', '')}")
+            st.markdown(
+                f"**{label}:** \\${case.get('price', 0):.2f} · {prob:.0f}% prob · "
+                f"{_md_safe(case.get('reasoning', ''))}"
+            )
 
 
 def _render_clash(clash: dict) -> None:
     st.subheader("⚔️ Clash points")
     for i, cp in enumerate(clash.get("clashPoints", []), start=1):
         with st.expander(f"{i}. {cp.get('topic', '')} — winner: {cp.get('winner', '?')}"):
-            st.markdown(f"**Bull:** {cp.get('bull', '')}")
-            st.markdown(f"**Bear:** {cp.get('bear', '')}")
-            st.markdown(f"**Why {cp.get('winner', '?')} wins:** {cp.get('reasoning', '')}")
+            st.markdown(f"**Bull:** {_md_safe(cp.get('bull', ''))}")
+            st.markdown(f"**Bear:** {_md_safe(cp.get('bear', ''))}")
+            st.markdown(f"**Why {cp.get('winner', '?')} wins:** {_md_safe(cp.get('reasoning', ''))}")
 
 
 def _render_heads(head_bull: str, head_bear: str) -> None:
@@ -254,10 +270,10 @@ def _render_heads(head_bull: str, head_bear: str) -> None:
     left, right = st.columns(2)
     with left:
         st.markdown("### :green[Head Bull]")
-        st.write(head_bull or "(no output)")
+        st.markdown(_md_safe(head_bull) or "(no output)")
     with right:
         st.markdown("### :red[Head Bear]")
-        st.write(head_bear or "(no output)")
+        st.markdown(_md_safe(head_bear) or "(no output)")
 
 
 def _render_agents(bull: dict, bear: dict) -> None:
@@ -268,12 +284,12 @@ def _render_agents(bull: dict, bear: dict) -> None:
         st.markdown("### :green[Bull]")
         for key, label in BULL_KEYS:
             with st.expander(label):
-                st.write(bull.get(key, "(no output)"))
+                st.markdown(_md_safe(bull.get(key, "")) or "(no output)")
     with right:
         st.markdown("### :red[Bear]")
         for key, label in BEAR_KEYS:
             with st.expander(label):
-                st.write(bear.get(key, "(no output)"))
+                st.markdown(_md_safe(bear.get(key, "")) or "(no output)")
 
 
 def render_result(debate: dict) -> None:
@@ -284,8 +300,8 @@ def render_result(debate: dict) -> None:
     _render_heads(debate.get("headBull", ""), debate.get("headBear", ""))
     _render_agents(debate.get("bull", {}), debate.get("bear", {}))
 
-    with st.expander("🔎 Researcher findings"):
-        st.write(debate.get("researcher", ""))
+    with st.expander("🔎 Researcher findings (fact-checked)"):
+        st.markdown(_md_safe(debate.get("researcher", "")))
 
     if st.button("New debate"):
         st.session_state.phase = "idle"
