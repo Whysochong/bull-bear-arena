@@ -72,41 +72,97 @@ def render_form() -> None:
         st.rerun()
 
 
+_GRID_BULL = [
+    ("bull_fundamentals", "📊 Fundamentals"),
+    ("bull_growth",       "🚀 Growth"),
+    ("bull_macro",        "🌍 Macro Tailwinds"),
+    ("bull_moat",         "🏰 Moat"),
+    ("bull_capital",      "💎 Capital Allocation"),
+    ("bull_technicals",   "📈 Technicals"),
+]
+_GRID_BEAR = [
+    ("bear_risk",         "⚠️ Risk"),
+    ("bear_valuation",    "💰 Valuation"),
+    ("bear_headwinds",    "🌪️ Macro Headwinds"),
+    ("bear_disruption",   "🎯 Disruption"),
+    ("bear_accounting",   "🚩 Accounting"),
+    ("bear_technicals",   "📉 Technicals"),
+]
+_ALL_AGENT_KEYS = (
+    ["researcher"]
+    + [k for k, _ in _GRID_BULL]
+    + [k for k, _ in _GRID_BEAR]
+    + ["judge", "price_target"]
+)
+
+
+def _agent_icon(state: str) -> str:
+    return {"pending": "⚪", "running": "🟡", "done": "✅"}.get(state, "⚪")
+
+
+def _render_status_grid(placeholder, states: dict[str, str]) -> None:
+    with placeholder.container():
+        st.markdown(f"{_agent_icon(states['researcher'])} 🔎 **Researcher** (WebSearch)")
+        st.markdown("---")
+        col_b, col_r = st.columns(2)
+        with col_b:
+            st.markdown("**:green[Bull agents]** (running in parallel)")
+            for key, label in _GRID_BULL:
+                st.markdown(f"{_agent_icon(states[key])} {label}")
+        with col_r:
+            st.markdown("**:red[Bear agents]** (running in parallel)")
+            for key, label in _GRID_BEAR:
+                st.markdown(f"{_agent_icon(states[key])} {label}")
+        st.markdown("---")
+        st.markdown(f"{_agent_icon(states['judge'])} ⚖️ **Judge**")
+        st.markdown(f"{_agent_icon(states['price_target'])} 🎯 **Price Target**")
+
+
 def render_running() -> None:
     ticker = st.session_state._pending_ticker
     notes = st.session_state._pending_notes
     st.header(f"⚔️ Debating {ticker}")
 
     progress_bar = st.progress(0.0, text="Starting…")
-    with st.status("Running 15-agent pipeline…", expanded=True) as status:
-        live_text = st.empty()
-        try:
-            for event in agents.run_debate(ticker, notes=notes):
-                if event["type"] == "agent_start":
-                    st.write(f"**{event['step']}/{event['total']}** — {event['label']}")
-                    progress_bar.progress(
-                        (event["step"] - 1) / event["total"],
-                        text=event["label"],
-                    )
-                elif event["type"] == "agent_complete":
-                    progress_bar.progress(
-                        event["step"] / event["total"],
-                        text=f"{event['step']}/{event['total']} done",
-                    )
-                    live_text.markdown(f"> {event['text'][:400]}…" if len(event["text"]) > 400 else f"> {event['text']}")
-                elif event["type"] == "debate_complete":
-                    debate = event["debate"]
-                    storage.save_debate(debate)
-                    st.session_state.debate = debate
-                    st.session_state.phase = "done"
-            status.update(label="Debate complete.", state="complete")
-        except agents.AgentError as e:
-            st.session_state.error = (
-                f"{e}\n\nTip: the ticker and your notes are still filled in on the form — "
-                f"just click Debate again to retry."
-            )
-            st.session_state.phase = "idle"
-            status.update(label=f"Failed: {e}", state="error")
+    grid_placeholder = st.empty()
+    states: dict[str, str] = {k: "pending" for k in _ALL_AGENT_KEYS}
+    _render_status_grid(grid_placeholder, states)
+
+    st.markdown("**Latest output**")
+    live_text = st.empty()
+    live_text.caption("(waiting for first agent…)")
+
+    total = len(_ALL_AGENT_KEYS)
+    completed = 0
+    try:
+        for event in agents.run_debate(ticker, notes=notes):
+            if event["type"] == "agent_start":
+                states[event["key"]] = "running"
+                _render_status_grid(grid_placeholder, states)
+            elif event["type"] == "agent_complete":
+                states[event["key"]] = "done"
+                completed += 1
+                progress_bar.progress(
+                    completed / total,
+                    text=f"{completed}/{total} agents done",
+                )
+                _render_status_grid(grid_placeholder, states)
+                preview = (
+                    event["text"][:400] + "…"
+                    if len(event["text"]) > 400 else event["text"]
+                )
+                live_text.markdown(f"**{event['key']}**\n\n> {preview}")
+            elif event["type"] == "debate_complete":
+                debate = event["debate"]
+                storage.save_debate(debate)
+                st.session_state.debate = debate
+                st.session_state.phase = "done"
+    except agents.AgentError as e:
+        st.session_state.error = (
+            f"{e}\n\nTip: the ticker and your notes are still filled in on the form — "
+            f"just click Debate again to retry."
+        )
+        st.session_state.phase = "idle"
 
     st.rerun()
 

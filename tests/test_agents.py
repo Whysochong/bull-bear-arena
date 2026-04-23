@@ -179,11 +179,12 @@ AGENT_SEQUENCE = [
     "bear_disruption", "bear_accounting", "bear_technicals",
     "judge", "price_target",
 ]
+SPECIALIST_KEYS = set(AGENT_SEQUENCE[1:13])
 
 
 @patch("agents.run_structured_agent")
 @patch("agents.run_agent")
-def test_run_debate_emits_all_events_in_order(mock_text, mock_struct):
+def test_run_debate_emits_all_events(mock_text, mock_struct):
     mock_text.return_value = "stub analysis"
     mock_struct.side_effect = [
         {"clashPoints": [], "winner": "BULL", "verdict": 7, "summary": "ok"},
@@ -203,11 +204,18 @@ def test_run_debate_emits_all_events_in_order(mock_text, mock_struct):
     completes = [e for e in events if e["type"] == "agent_complete"]
     finals = [e for e in events if e["type"] == "debate_complete"]
 
+    # agent_start events: researcher first, specialists in declaration order, then judge+price_target
     assert [e["key"] for e in starts] == AGENT_SEQUENCE
-    assert [e["key"] for e in completes] == AGENT_SEQUENCE
+    # agent_complete events: researcher first, specialists in any order (concurrent),
+    # judge second-to-last, price_target last
+    assert completes[0]["key"] == "researcher"
+    assert {e["key"] for e in completes[1:13]} == SPECIALIST_KEYS
+    assert completes[13]["key"] == "judge"
+    assert completes[14]["key"] == "price_target"
+
     assert len(finals) == 1
-    # Progress counters are 1-indexed and span 1..15
-    assert [e["step"] for e in starts] == list(range(1, 16))
+    # Progress counter assigned at start time is 1..15
+    assert sorted(e["step"] for e in starts) == list(range(1, 16))
     assert all(e["total"] == 15 for e in starts)
 
 

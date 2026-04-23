@@ -7,6 +7,7 @@ import re
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Iterable
 
@@ -15,6 +16,7 @@ import prompts as _prompts
 
 AGENT_TIMEOUT_SECONDS = 300  # 5 minutes per agent call
 DEFAULT_MODEL = "sonnet"
+SPECIALIST_CONCURRENCY = 12  # all 12 specialist agents run in parallel (6 bull + 6 bear)
 _MD_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
 # Ordered pipeline. Each entry: (event_key, label, kind, bucket_path)
@@ -232,6 +234,10 @@ def _price_target_prompt(
 def run_debate(ticker: str, notes: str = ""):
     """Generator: run the full 15-agent pipeline, yielding progress events.
 
+    Phases: (1) researcher sequential with WebSearch, (2) 12 specialists in
+    parallel via ThreadPoolExecutor (up to SPECIALIST_CONCURRENCY at a time),
+    (3) judge sequential, (4) price target sequential.
+
     Final event is {'type': 'debate_complete', 'debate': {...}}.
     """
     ticker = ticker.upper().strip()
@@ -246,62 +252,91 @@ def run_debate(ticker: str, notes: str = ""):
         "priceTarget": {},
     }
     total = len(_PIPELINE)
+    step_counter = 0
 
-    for step, (key, label, kind, path) in enumerate(_PIPELINE, start=1):
-        yield {"type": "agent_start", "key": key, "label": label, "step": step, "total": total}
+    def _bump_step() -> int:
+        nonlocal step_counter
+        step_counter += 1
+        return step_counter
 
-        try:
-            if kind == "research":
-                text = run_agent(
-                    _prompts.SYSTEM_PROMPTS[key],
-                    _researcher_prompt(ticker, notes),
-                    tools=["WebSearch"],
-                )
-                debate["researcher"] = text
-                emitted = text
+    # --- Phase 1: Researcher (sequential, WebSearch) ---------------------
+    r_key, r_label, _, _ = _PIPELINE[0]
+    r_step = _bump_step()
+    yield {"type": "agent_start", "key": r_key, "label": r_label,
+           "step": r_step, "total": total}
+    try:
+        researcher_text = run_agent(
+            _prompts.SYSTEM_PROMPTS[r_key],
+            _researcher_prompt(ticker, notes),
+            tools=["WebSearch"],
+        )
+    except AgentError as e:
+        researcher_text = f"n/a — researcher failed: {e}"
+    debate["researcher"] = researcher_text
+    yield {"type": "agent_complete", "key": r_key, "text": researcher_text,
+           "step": r_step, "total": total}
 
-            elif kind in ("analyst_bull", "analyst_bear"):
-                side = "bullish" if kind == "analyst_bull" else "bearish"
-                text = run_agent(
-                    _prompts.SYSTEM_PROMPTS[key],
-                    _analyst_prompt(ticker, notes, debate["researcher"], side),
-                )
-                bucket_name, field = path
-                debate[bucket_name][field] = text
-                emitted = text
+    # --- Phase 2: 12 specialists in parallel -----------------------------
+    specialist_entries = [
+        entry for entry in _PIPELINE
+        if entry[2] in ("analyst_bull", "analyst_bear")
+    ]
+    specialist_steps: dict[str, int] = {}
+    # Emit every specialist's agent_start up front so the UI can flip them all
+    # to "running" before the thread pool starts blocking.
+    for key, label, _kind, _path in specialist_entries:
+        specialist_steps[key] = _bump_step()
+        yield {"type": "agent_start", "key": key, "label": label,
+               "step": specialist_steps[key], "total": total}
 
-            elif kind == "judge":
-                clash = run_structured_agent(
-                    _prompts.SYSTEM_PROMPTS[key],
-                    _judge_prompt(ticker, debate["bull"], debate["bear"]),
-                    schema=_prompts.JUDGE_SCHEMA,
-                )
-                debate["clash"] = clash
-                emitted = json.dumps(clash)
+    def _run_specialist(entry):
+        key, _label, kind, path = entry
+        side = "bullish" if kind == "analyst_bull" else "bearish"
+        text = run_agent(
+            _prompts.SYSTEM_PROMPTS[key],
+            _analyst_prompt(ticker, notes, debate["researcher"], side),
+        )
+        return key, path, text
 
-            elif kind == "price_target":
-                pt = run_structured_agent(
-                    _prompts.SYSTEM_PROMPTS[key],
-                    _price_target_prompt(
-                        ticker, debate["researcher"],
-                        debate["bull"], debate["bear"], debate["clash"],
-                    ),
-                    schema=_prompts.PRICE_TARGET_SCHEMA,
-                )
-                debate["priceTarget"] = pt
-                emitted = json.dumps(pt)
+    with ThreadPoolExecutor(max_workers=SPECIALIST_CONCURRENCY) as pool:
+        futures = {pool.submit(_run_specialist, entry): entry[0]
+                   for entry in specialist_entries}
+        for fut in as_completed(futures):
+            key, path, text = fut.result()  # AgentError propagates
+            bucket_name, field = path
+            debate[bucket_name][field] = text
+            yield {"type": "agent_complete", "key": key, "text": text,
+                   "step": specialist_steps[key], "total": total}
 
-            else:
-                raise RuntimeError(f"unknown pipeline kind: {kind}")
+    # --- Phase 3: Judge (sequential, depends on all specialists) ---------
+    j_key, j_label, _, _ = _PIPELINE[-2]
+    j_step = _bump_step()
+    yield {"type": "agent_start", "key": j_key, "label": j_label,
+           "step": j_step, "total": total}
+    clash = run_structured_agent(
+        _prompts.SYSTEM_PROMPTS[j_key],
+        _judge_prompt(ticker, debate["bull"], debate["bear"]),
+        schema=_prompts.JUDGE_SCHEMA,
+    )
+    debate["clash"] = clash
+    yield {"type": "agent_complete", "key": j_key, "text": json.dumps(clash),
+           "step": j_step, "total": total}
 
-        except AgentError as e:
-            if kind == "research":
-                debate["researcher"] = f"n/a — researcher failed: {e}"
-                emitted = debate["researcher"]
-            else:
-                raise
-
-        yield {"type": "agent_complete", "key": key, "text": emitted,
-               "step": step, "total": total}
+    # --- Phase 4: Price target (sequential, depends on judge) ------------
+    p_key, p_label, _, _ = _PIPELINE[-1]
+    p_step = _bump_step()
+    yield {"type": "agent_start", "key": p_key, "label": p_label,
+           "step": p_step, "total": total}
+    pt = run_structured_agent(
+        _prompts.SYSTEM_PROMPTS[p_key],
+        _price_target_prompt(
+            ticker, debate["researcher"],
+            debate["bull"], debate["bear"], debate["clash"],
+        ),
+        schema=_prompts.PRICE_TARGET_SCHEMA,
+    )
+    debate["priceTarget"] = pt
+    yield {"type": "agent_complete", "key": p_key, "text": json.dumps(pt),
+           "step": p_step, "total": total}
 
     yield {"type": "debate_complete", "debate": debate}
