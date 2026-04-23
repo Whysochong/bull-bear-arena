@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from pathlib import Path
 from typing import Iterable
 
 import prompts as _prompts
@@ -18,6 +20,55 @@ AGENT_TIMEOUT_SECONDS = 300  # 5 minutes per agent call
 DEFAULT_MODEL = "sonnet"
 SPECIALIST_CONCURRENCY = 12  # all 12 specialist agents run in parallel (6 bull + 6 bear)
 _MD_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+
+# Rolling human-readable log of debate progress so the user can
+#   tail -f ~/Desktop/trading/bull-bear-arena/debates/_live.log
+# to cross-check whether the GUI is still making progress or stuck.
+_LIVE_LOG_PATH = Path(__file__).resolve().parent / "debates" / "_live.log"
+
+
+def _log_live(ticker: str, event: dict) -> None:
+    """Append one readable line per debate event to debates/_live.log.
+
+    Best-effort only: any logging error is swallowed so a disk problem never
+    breaks a debate in progress. Disabled when BBA_DISABLE_LIVE_LOG=1 (used
+    by the test suite so unit runs don't pollute the real log file).
+    """
+    if os.environ.get("BBA_DISABLE_LIVE_LOG") == "1":
+        return
+    try:
+        _LIVE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%H:%M:%S")
+        et = event.get("type", "?")
+        if et == "agent_start":
+            line = (
+                f"[{stamp}] {ticker:<6} START  "
+                f"{event['step']:>2}/{event['total']}  {event['key']}"
+            )
+        elif et == "agent_complete":
+            preview = event.get("text", "").replace("\n", " ")[:100]
+            line = (
+                f"[{stamp}] {ticker:<6} DONE   "
+                f"{event['step']:>2}/{event['total']}  {event['key']}  —  {preview}"
+            )
+        elif et == "debate_complete":
+            clash = event.get("debate", {}).get("clash", {})
+            line = (
+                f"[{stamp}] {ticker:<6} SAVED  verdict={clash.get('winner', '?')} "
+                f"{clash.get('verdict', '?')}/10"
+            )
+        else:
+            line = f"[{stamp}] {ticker:<6} {et}  {event.get('key', '')}"
+        with _LIVE_LOG_PATH.open("a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def _tee(ticker: str, event: dict) -> dict:
+    """Log ``event`` to the live log and return it unchanged (for `yield _tee(...)`)."""
+    _log_live(ticker, event)
+    return event
 
 # Ordered pipeline. Each entry: (event_key, label, kind, bucket_path)
 # kind in {"research", "fact_check", "analyst_bull", "analyst_bear",
@@ -288,8 +339,8 @@ def run_debate(ticker: str, notes: str = ""):
     # --- Phase 1: Researcher (sequential, WebSearch) ---------------------
     r_key, r_label, _, _ = _PIPELINE[0]
     r_step = _bump_step()
-    yield {"type": "agent_start", "key": r_key, "label": r_label,
-           "step": r_step, "total": total}
+    yield _tee(ticker, {"type": "agent_start", "key": r_key, "label": r_label,
+                        "step": r_step, "total": total})
     try:
         researcher_text = run_agent(
             _prompts.SYSTEM_PROMPTS[r_key],
@@ -299,14 +350,14 @@ def run_debate(ticker: str, notes: str = ""):
     except AgentError as e:
         researcher_text = f"n/a — researcher failed: {e}"
     debate["researcher"] = researcher_text
-    yield {"type": "agent_complete", "key": r_key, "text": researcher_text,
-           "step": r_step, "total": total}
+    yield _tee(ticker, {"type": "agent_complete", "key": r_key, "text": researcher_text,
+                        "step": r_step, "total": total})
 
     # --- Phase 1b: Fact-checker (sequential, WebSearch) ------------------
     fc_key, fc_label, _, _ = _PIPELINE[1]
     fc_step = _bump_step()
-    yield {"type": "agent_start", "key": fc_key, "label": fc_label,
-           "step": fc_step, "total": total}
+    yield _tee(ticker, {"type": "agent_start", "key": fc_key, "label": fc_label,
+                        "step": fc_step, "total": total})
     try:
         fact_checked = run_agent(
             _prompts.SYSTEM_PROMPTS[fc_key],
@@ -317,8 +368,8 @@ def run_debate(ticker: str, notes: str = ""):
     except AgentError as e:
         # Fact-checker failure is non-fatal — keep the raw researcher text
         fact_checked = f"(fact-checker failed: {e}) — using raw researcher brief below:\n\n{researcher_text}"
-    yield {"type": "agent_complete", "key": fc_key, "text": fact_checked,
-           "step": fc_step, "total": total}
+    yield _tee(ticker, {"type": "agent_complete", "key": fc_key, "text": fact_checked,
+                        "step": fc_step, "total": total})
 
     # --- Phase 2: 12 specialists in parallel -----------------------------
     specialist_entries = [
@@ -328,8 +379,8 @@ def run_debate(ticker: str, notes: str = ""):
     specialist_steps: dict[str, int] = {}
     for key, label, _kind, _path in specialist_entries:
         specialist_steps[key] = _bump_step()
-        yield {"type": "agent_start", "key": key, "label": label,
-               "step": specialist_steps[key], "total": total}
+        yield _tee(ticker, {"type": "agent_start", "key": key, "label": label,
+                            "step": specialist_steps[key], "total": total})
 
     def _run_specialist(entry):
         key, _label, kind, path = entry
@@ -347,8 +398,8 @@ def run_debate(ticker: str, notes: str = ""):
             key, path, text = fut.result()  # AgentError propagates
             bucket_name, field = path
             debate[bucket_name][field] = text
-            yield {"type": "agent_complete", "key": key, "text": text,
-                   "step": specialist_steps[key], "total": total}
+            yield _tee(ticker, {"type": "agent_complete", "key": key, "text": text,
+                                "step": specialist_steps[key], "total": total})
 
     # --- Phase 3: Head Bull + Head Bear in parallel ----------------------
     head_entries = [
@@ -358,8 +409,8 @@ def run_debate(ticker: str, notes: str = ""):
     head_steps: dict[str, int] = {}
     for key, label, _kind, _path in head_entries:
         head_steps[key] = _bump_step()
-        yield {"type": "agent_start", "key": key, "label": label,
-               "step": head_steps[key], "total": total}
+        yield _tee(ticker, {"type": "agent_start", "key": key, "label": label,
+                            "step": head_steps[key], "total": total})
 
     def _run_head(entry):
         key, _label, kind, path = entry
@@ -380,28 +431,28 @@ def run_debate(ticker: str, notes: str = ""):
             key, path, text = fut.result()
             (field,) = path
             debate[field] = text
-            yield {"type": "agent_complete", "key": key, "text": text,
-                   "step": head_steps[key], "total": total}
+            yield _tee(ticker, {"type": "agent_complete", "key": key, "text": text,
+                                "step": head_steps[key], "total": total})
 
     # --- Phase 4: Judge (sequential, reads the two head briefs) ----------
     j_key, j_label, _, _ = _PIPELINE[-2]
     j_step = _bump_step()
-    yield {"type": "agent_start", "key": j_key, "label": j_label,
-           "step": j_step, "total": total}
+    yield _tee(ticker, {"type": "agent_start", "key": j_key, "label": j_label,
+                        "step": j_step, "total": total})
     clash = run_structured_agent(
         _prompts.SYSTEM_PROMPTS[j_key],
         _judge_prompt(ticker, debate["headBull"], debate["headBear"]),
         schema=_prompts.JUDGE_SCHEMA,
     )
     debate["clash"] = clash
-    yield {"type": "agent_complete", "key": j_key, "text": json.dumps(clash),
-           "step": j_step, "total": total}
+    yield _tee(ticker, {"type": "agent_complete", "key": j_key, "text": json.dumps(clash),
+                        "step": j_step, "total": total})
 
     # --- Phase 5: Price target (sequential, depends on judge) ------------
     p_key, p_label, _, _ = _PIPELINE[-1]
     p_step = _bump_step()
-    yield {"type": "agent_start", "key": p_key, "label": p_label,
-           "step": p_step, "total": total}
+    yield _tee(ticker, {"type": "agent_start", "key": p_key, "label": p_label,
+                        "step": p_step, "total": total})
     pt = run_structured_agent(
         _prompts.SYSTEM_PROMPTS[p_key],
         _price_target_prompt(
@@ -411,7 +462,7 @@ def run_debate(ticker: str, notes: str = ""):
         schema=_prompts.PRICE_TARGET_SCHEMA,
     )
     debate["priceTarget"] = pt
-    yield {"type": "agent_complete", "key": p_key, "text": json.dumps(pt),
-           "step": p_step, "total": total}
+    yield _tee(ticker, {"type": "agent_complete", "key": p_key, "text": json.dumps(pt),
+                        "step": p_step, "total": total})
 
-    yield {"type": "debate_complete", "debate": debate}
+    yield _tee(ticker, {"type": "debate_complete", "debate": debate})
