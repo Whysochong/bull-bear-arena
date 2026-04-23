@@ -6,6 +6,7 @@ import json
 import re
 import subprocess
 import tempfile
+import time
 from datetime import datetime
 from typing import Iterable
 
@@ -62,6 +63,33 @@ def _build_argv(
     return argv
 
 
+def _looks_like_rate_limit(stderr: str) -> bool:
+    s = stderr.lower()
+    return "429" in s or "rate limit" in s or "rate_limit" in s
+
+
+def _run_with_retry(argv: list[str], *, attempts: int = 2, wait_s: int = 30):
+    last_err = ""
+    for attempt in range(attempts):
+        with tempfile.TemporaryDirectory(prefix="bba-") as clean_cwd:
+            proc = subprocess.run(
+                argv,
+                cwd=clean_cwd,
+                capture_output=True,
+                text=True,
+                timeout=AGENT_TIMEOUT_SECONDS,
+            )
+        if proc.returncode == 0:
+            return proc
+        last_err = proc.stderr
+        if not _looks_like_rate_limit(proc.stderr):
+            return proc
+        if attempt + 1 < attempts:
+            time.sleep(wait_s)
+    # All attempts failed — return the final proc so caller raises AgentError
+    return proc
+
+
 def run_agent(
     system_prompt: str,
     user_prompt: str,
@@ -72,14 +100,7 @@ def run_agent(
     """Run a single claude -p call and return the assistant's text response."""
     argv = _build_argv(system_prompt, user_prompt, tools=tools, json_schema=None, model=model)
 
-    with tempfile.TemporaryDirectory(prefix="bba-") as clean_cwd:
-        proc = subprocess.run(
-            argv,
-            cwd=clean_cwd,
-            capture_output=True,
-            text=True,
-            timeout=AGENT_TIMEOUT_SECONDS,
-        )
+    proc = _run_with_retry(argv)
 
     if proc.returncode != 0:
         raise AgentError(
@@ -110,14 +131,7 @@ def run_structured_agent(
         tools=None, json_schema=schema, model=model,
     )
 
-    with tempfile.TemporaryDirectory(prefix="bba-") as clean_cwd:
-        proc = subprocess.run(
-            argv,
-            cwd=clean_cwd,
-            capture_output=True,
-            text=True,
-            timeout=AGENT_TIMEOUT_SECONDS,
-        )
+    proc = _run_with_retry(argv)
 
     if proc.returncode != 0:
         raise AgentError(

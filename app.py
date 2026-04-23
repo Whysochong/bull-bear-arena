@@ -39,10 +39,15 @@ def render_form() -> None:
     with st.form("debate_form", clear_on_submit=False):
         col1, col2 = st.columns([1, 3])
         with col1:
-            ticker = st.text_input("Ticker", placeholder="AAPL", max_chars=10).strip().upper()
+            ticker = st.text_input(
+                "Ticker",
+                value=st.session_state.get("_pending_ticker", ""),
+                placeholder="AAPL", max_chars=10,
+            ).strip().upper()
         with col2:
             notes = st.text_area(
                 "Optional context (breaking news, earnings, etc.)",
+                value=st.session_state.get("_pending_notes", ""),
                 placeholder="Optional — paste any context you want every agent to see.",
                 height=80,
             )
@@ -89,7 +94,10 @@ def render_running() -> None:
                     st.session_state.phase = "done"
             status.update(label="Debate complete.", state="complete")
         except agents.AgentError as e:
-            st.session_state.error = str(e)
+            st.session_state.error = (
+                f"{e}\n\nTip: the ticker and your notes are still filled in on the form — "
+                f"just click Debate again to retry."
+            )
             st.session_state.phase = "idle"
             status.update(label=f"Failed: {e}", state="error")
 

@@ -266,3 +266,14 @@ def test_run_debate_survives_researcher_failure(mock_text, mock_struct):
     events = list(agents.run_debate("NVDA", notes=""))
     final = [e for e in events if e["type"] == "debate_complete"][0]["debate"]
     assert final["researcher"].startswith("n/a")
+
+
+@patch("agents.time.sleep", return_value=None)
+@patch("agents.subprocess.run")
+def test_run_agent_retries_once_on_rate_limit(mock_run, _sleep):
+    first = MagicMock(returncode=1, stdout="", stderr="HTTP 429 rate limit exceeded")
+    second = _fake_proc("recovered")
+    mock_run.side_effect = [first, second]
+
+    assert agents.run_agent("sys", "user") == "recovered"
+    assert mock_run.call_count == 2
