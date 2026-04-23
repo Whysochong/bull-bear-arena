@@ -67,24 +67,27 @@ def _looks_like_rate_limit(stderr: str) -> bool:
 
 
 def _run_with_retry(argv: list[str], *, attempts: int = 2, wait_s: int = 30):
-    last_err = ""
     for attempt in range(attempts):
         with tempfile.TemporaryDirectory(prefix="bba-") as clean_cwd:
-            proc = subprocess.run(
-                argv,
-                cwd=clean_cwd,
-                capture_output=True,
-                text=True,
-                timeout=AGENT_TIMEOUT_SECONDS,
-            )
+            try:
+                proc = subprocess.run(
+                    argv,
+                    cwd=clean_cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=AGENT_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as e:
+                raise AgentError(
+                    f"claude -p timed out after {AGENT_TIMEOUT_SECONDS}s"
+                ) from e
         if proc.returncode == 0:
             return proc
-        last_err = proc.stderr
         if not _looks_like_rate_limit(proc.stderr):
             return proc
         if attempt + 1 < attempts:
             time.sleep(wait_s)
-    # All attempts failed — return the final proc so caller raises AgentError
+    # All attempts exhausted — return the final proc so caller raises AgentError
     return proc
 
 
@@ -216,8 +219,8 @@ def _price_target_prompt(
         f"=== BULL ANALYSES ===\n{bull_block}\n\n"
         f"=== BEAR ANALYSES ===\n{bear_block}\n\n"
         f"=== JUDGE VERDICT ===\n"
-        f"Winner: {clash['winner']}  Score: {clash['verdict']}/10\n"
-        f"Summary: {clash['summary']}\n\n"
+        f"Winner: {clash.get('winner', '?')}  Score: {clash.get('verdict', '?')}/10\n"
+        f"Summary: {clash.get('summary', '')}\n\n"
         f"Produce the price target JSON."
     )
 

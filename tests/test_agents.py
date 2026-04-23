@@ -144,6 +144,33 @@ def test_run_structured_agent_raises_on_unparseable_result(mock_run):
         raise AssertionError("expected AgentError")
 
 
+@patch("agents.subprocess.run")
+def test_run_agent_raises_agent_error_on_timeout(mock_run):
+    import subprocess as _sp
+    mock_run.side_effect = _sp.TimeoutExpired(cmd="claude", timeout=300)
+    try:
+        agents.run_agent("sys", "user")
+    except agents.AgentError as e:
+        assert "timed out" in str(e).lower()
+    else:
+        raise AssertionError("expected AgentError on timeout")
+
+
+@patch("agents.time.sleep", return_value=None)
+@patch("agents.subprocess.run")
+def test_run_agent_does_not_retry_on_non_rate_limit_failure(mock_run, _sleep):
+    fail = MagicMock(returncode=1, stdout="", stderr="Error: unknown flag --foo")
+    mock_run.return_value = fail
+    try:
+        agents.run_agent("sys", "user")
+    except agents.AgentError:
+        pass
+    else:
+        raise AssertionError("expected AgentError")
+    # Must have been called exactly once — no retry for non-rate-limit failures
+    assert mock_run.call_count == 1
+
+
 AGENT_SEQUENCE = [
     "researcher",
     "bull_fundamentals", "bull_growth", "bull_macro",

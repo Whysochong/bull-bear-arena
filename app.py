@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 
 import streamlit as st
@@ -54,6 +55,12 @@ def render_form() -> None:
         submitted = st.form_submit_button("Debate", type="primary")
 
     if submitted and ticker:
+        if not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", ticker):
+            st.error(
+                f"Ticker '{ticker}' is invalid. Use 1-10 chars, start with a "
+                "letter, only A-Z, 0-9, dot, or dash."
+            )
+            return
         st.session_state.phase = "running"
         st.session_state.progress = 0
         st.session_state.progress_label = ""
