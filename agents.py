@@ -47,7 +47,6 @@ def _build_argv(
     user_prompt: str,
     *,
     tools: Iterable[str] | None,
-    json_schema: dict | None,
     model: str,
 ) -> list[str]:
     argv = [
@@ -57,9 +56,8 @@ def _build_argv(
         "--system-prompt", system_prompt,
         "--tools", " ".join(tools) if tools else "",
     ]
-    if json_schema is not None:
-        argv += ["--json-schema", json.dumps(json_schema)]
-    argv.append(user_prompt)
+    # `--tools` is variadic; use `--` to end options before the prompt positional
+    argv += ["--", user_prompt]
     return argv
 
 
@@ -98,7 +96,7 @@ def run_agent(
     model: str = DEFAULT_MODEL,
 ) -> str:
     """Run a single claude -p call and return the assistant's text response."""
-    argv = _build_argv(system_prompt, user_prompt, tools=tools, json_schema=None, model=model)
+    argv = _build_argv(system_prompt, user_prompt, tools=tools, model=model)
 
     proc = _run_with_retry(argv)
 
@@ -125,10 +123,21 @@ def run_structured_agent(
     schema: dict,
     model: str = DEFAULT_MODEL,
 ) -> dict:
-    """Run a claude -p call with --json-schema; return the parsed JSON dict."""
+    """Run a claude -p call expecting raw JSON output; return the parsed dict.
+
+    The CLI's ``--json-schema`` flag triggers a tool-use flow whose textual
+    ``result`` is a prose summary rather than the structured data, so we
+    append the schema to the system prompt instead and parse ``result`` as JSON.
+    """
+    augmented_system = (
+        f"{system_prompt}\n\n"
+        f"You MUST respond with ONLY a single JSON object matching this JSON Schema. "
+        f"No markdown code fences. No prose before or after. Just the JSON object.\n\n"
+        f"{json.dumps(schema, indent=2)}"
+    )
     argv = _build_argv(
-        system_prompt, user_prompt,
-        tools=None, json_schema=schema, model=model,
+        augmented_system, user_prompt,
+        tools=None, model=model,
     )
 
     proc = _run_with_retry(argv)

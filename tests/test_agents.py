@@ -105,15 +105,18 @@ def test_run_structured_agent_parses_json_result(mock_run):
 
 
 @patch("agents.subprocess.run")
-def test_run_structured_agent_passes_schema_flag(mock_run):
+def test_run_structured_agent_embeds_schema_in_system_prompt(mock_run):
     schema = {"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}
     mock_run.return_value = _fake_proc('{"x": "y"}')
-    agents.run_structured_agent("sys", "user", schema=schema)
+    agents.run_structured_agent("base system", "user", schema=schema)
 
     argv = mock_run.call_args[0][0]
-    assert "--json-schema" in argv
-    passed = json.loads(argv[argv.index("--json-schema") + 1])
-    assert passed == schema
+    # Schema is appended to --system-prompt rather than passed as a CLI flag
+    assert "--json-schema" not in argv
+    system_value = argv[argv.index("--system-prompt") + 1]
+    assert "base system" in system_value
+    assert '"type": "object"' in system_value
+    assert '"required"' in system_value
 
 
 @patch("agents.subprocess.run")

@@ -6,3 +6,5 @@ venv/
 debates/
 .DS_Store
 .streamlit/secrets.toml
+smoke.log
+smoke_live.py
