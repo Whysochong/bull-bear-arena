@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 from typing import Iterable
@@ -10,6 +11,7 @@ from typing import Iterable
 
 AGENT_TIMEOUT_SECONDS = 300  # 5 minutes per agent call
 DEFAULT_MODEL = "sonnet"
+_MD_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
 
 class AgentError(RuntimeError):
@@ -70,3 +72,46 @@ def run_agent(
     if not isinstance(result, str):
         raise AgentError(f"claude -p output missing 'result' string: {repr(payload)[:300]}")
     return result
+
+
+def run_structured_agent(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    schema: dict,
+    model: str = DEFAULT_MODEL,
+) -> dict:
+    """Run a claude -p call with --json-schema; return the parsed JSON dict."""
+    argv = _build_argv(
+        system_prompt, user_prompt,
+        tools=None, json_schema=schema, model=model,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="bba-") as clean_cwd:
+        proc = subprocess.run(
+            argv,
+            cwd=clean_cwd,
+            capture_output=True,
+            text=True,
+            timeout=AGENT_TIMEOUT_SECONDS,
+        )
+
+    if proc.returncode != 0:
+        raise AgentError(
+            f"claude -p exited {proc.returncode}: {proc.stderr.strip()[:500]}"
+        )
+
+    try:
+        outer = json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        raise AgentError(f"claude -p returned non-JSON stdout: {e}") from e
+
+    inner_text = outer.get("result")
+    if not isinstance(inner_text, str):
+        raise AgentError(f"claude -p output missing 'result' string: {repr(outer)[:300]}")
+
+    cleaned = _MD_FENCE.sub("", inner_text).strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        raise AgentError(f"agent returned unparseable JSON: {e}\nraw: {repr(inner_text)[:300]}") from e

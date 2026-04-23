@@ -91,3 +91,51 @@ def test_run_agent_raises_on_malformed_json(mock_run):
         pass
     else:
         raise AssertionError("expected AgentError")
+
+
+@patch("agents.subprocess.run")
+def test_run_structured_agent_parses_json_result(mock_run):
+    inner = {"winner": "BULL", "verdict": 8, "summary": "s", "clashPoints": []}
+    mock_run.return_value = _fake_proc(json.dumps(inner))
+    out = agents.run_structured_agent(
+        "sys", "user",
+        schema={"type": "object", "properties": {}, "required": []},
+    )
+    assert out == inner
+
+
+@patch("agents.subprocess.run")
+def test_run_structured_agent_passes_schema_flag(mock_run):
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}
+    mock_run.return_value = _fake_proc('{"x": "y"}')
+    agents.run_structured_agent("sys", "user", schema=schema)
+
+    argv = mock_run.call_args[0][0]
+    assert "--json-schema" in argv
+    passed = json.loads(argv[argv.index("--json-schema") + 1])
+    assert passed == schema
+
+
+@patch("agents.subprocess.run")
+def test_run_structured_agent_strips_markdown_fences(mock_run):
+    # Defensive: if the model wraps JSON in ```json ... ``` despite the schema
+    mock_run.return_value = _fake_proc('```json\n{"winner": "BEAR"}\n```')
+    out = agents.run_structured_agent(
+        "sys", "user",
+        schema={"type": "object", "properties": {}, "required": []},
+    )
+    assert out == {"winner": "BEAR"}
+
+
+@patch("agents.subprocess.run")
+def test_run_structured_agent_raises_on_unparseable_result(mock_run):
+    mock_run.return_value = _fake_proc("not json")
+    try:
+        agents.run_structured_agent(
+            "sys", "user",
+            schema={"type": "object", "properties": {}, "required": []},
+        )
+    except agents.AgentError:
+        pass
+    else:
+        raise AssertionError("expected AgentError")
