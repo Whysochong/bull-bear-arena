@@ -89,10 +89,10 @@ _GRID_BEAR = [
     ("bear_technicals",   "📉 Technicals"),
 ]
 _ALL_AGENT_KEYS = (
-    ["researcher"]
+    ["researcher", "fact_checker"]
     + [k for k, _ in _GRID_BULL]
     + [k for k, _ in _GRID_BEAR]
-    + ["judge", "price_target"]
+    + ["head_bull", "head_bear", "judge", "price_target"]
 )
 
 
@@ -103,16 +103,21 @@ def _agent_icon(state: str) -> str:
 def _render_status_grid(placeholder, states: dict[str, str]) -> None:
     with placeholder.container():
         st.markdown(f"{_agent_icon(states['researcher'])} 🔎 **Researcher** (WebSearch)")
+        st.markdown(f"{_agent_icon(states['fact_checker'])} ✅ **Fact-Checker** (WebSearch, verifies researcher)")
         st.markdown("---")
         col_b, col_r = st.columns(2)
         with col_b:
-            st.markdown("**:green[Bull agents]** (running in parallel)")
+            st.markdown("**:green[Bull specialists]** (running in parallel)")
             for key, label in _GRID_BULL:
                 st.markdown(f"{_agent_icon(states[key])} {label}")
         with col_r:
-            st.markdown("**:red[Bear agents]** (running in parallel)")
+            st.markdown("**:red[Bear specialists]** (running in parallel)")
             for key, label in _GRID_BEAR:
                 st.markdown(f"{_agent_icon(states[key])} {label}")
+        st.markdown("---")
+        col_hb, col_hr = st.columns(2)
+        col_hb.markdown(f"{_agent_icon(states['head_bull'])} 👔 **Head Bull** (synthesis)")
+        col_hr.markdown(f"{_agent_icon(states['head_bear'])} 👔 **Head Bear** (synthesis)")
         st.markdown("---")
         st.markdown(f"{_agent_icon(states['judge'])} ⚖️ **Judge**")
         st.markdown(f"{_agent_icon(states['price_target'])} 🎯 **Price Target**")
@@ -243,8 +248,21 @@ def _render_clash(clash: dict) -> None:
             st.markdown(f"**Why {cp.get('winner', '?')} wins:** {cp.get('reasoning', '')}")
 
 
+def _render_heads(head_bull: str, head_bear: str) -> None:
+    st.subheader("👔 Lead advocates")
+    st.caption("Synthesized cases the judge actually reads.")
+    left, right = st.columns(2)
+    with left:
+        st.markdown("### :green[Head Bull]")
+        st.write(head_bull or "(no output)")
+    with right:
+        st.markdown("### :red[Head Bear]")
+        st.write(head_bear or "(no output)")
+
+
 def _render_agents(bull: dict, bear: dict) -> None:
     st.subheader("Specialist arguments")
+    st.caption("The raw analyses each head advocate drew from.")
     left, right = st.columns(2)
     with left:
         st.markdown("### :green[Bull]")
@@ -263,6 +281,7 @@ def render_result(debate: dict) -> None:
     _render_verdict(debate.get("clash", {}))
     _render_price_target(debate.get("priceTarget", {}))
     _render_clash(debate.get("clash", {}))
+    _render_heads(debate.get("headBull", ""), debate.get("headBear", ""))
     _render_agents(debate.get("bull", {}), debate.get("bear", {}))
 
     with st.expander("🔎 Researcher findings"):

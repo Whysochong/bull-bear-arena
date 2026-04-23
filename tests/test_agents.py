@@ -172,14 +172,17 @@ def test_run_agent_does_not_retry_on_non_rate_limit_failure(mock_run, _sleep):
 
 
 AGENT_SEQUENCE = [
-    "researcher",
+    "researcher", "fact_checker",
     "bull_fundamentals", "bull_growth", "bull_macro",
     "bull_moat", "bull_capital", "bull_technicals",
     "bear_risk", "bear_valuation", "bear_headwinds",
     "bear_disruption", "bear_accounting", "bear_technicals",
+    "head_bull", "head_bear",
     "judge", "price_target",
 ]
-SPECIALIST_KEYS = set(AGENT_SEQUENCE[1:13])
+SPECIALIST_KEYS = set(AGENT_SEQUENCE[2:14])
+HEAD_KEYS = {"head_bull", "head_bear"}
+TOTAL_AGENTS = 18
 
 
 @patch("agents.run_structured_agent")
@@ -204,28 +207,31 @@ def test_run_debate_emits_all_events(mock_text, mock_struct):
     completes = [e for e in events if e["type"] == "agent_complete"]
     finals = [e for e in events if e["type"] == "debate_complete"]
 
-    # agent_start events: researcher first, specialists in declaration order, then judge+price_target
+    # agent_start events: in declaration order
     assert [e["key"] for e in starts] == AGENT_SEQUENCE
-    # agent_complete events: researcher first, specialists in any order (concurrent),
-    # judge second-to-last, price_target last
+    # agent_complete order: researcher, fact_checker, then specialists (any
+    # order), then heads (any order), then judge, then price_target.
     assert completes[0]["key"] == "researcher"
-    assert {e["key"] for e in completes[1:13]} == SPECIALIST_KEYS
-    assert completes[13]["key"] == "judge"
-    assert completes[14]["key"] == "price_target"
+    assert completes[1]["key"] == "fact_checker"
+    assert {e["key"] for e in completes[2:14]} == SPECIALIST_KEYS
+    assert {e["key"] for e in completes[14:16]} == HEAD_KEYS
+    assert completes[16]["key"] == "judge"
+    assert completes[17]["key"] == "price_target"
 
     assert len(finals) == 1
-    # Progress counter assigned at start time is 1..15
-    assert sorted(e["step"] for e in starts) == list(range(1, 16))
-    assert all(e["total"] == 15 for e in starts)
+    assert sorted(e["step"] for e in starts) == list(range(1, TOTAL_AGENTS + 1))
+    assert all(e["total"] == TOTAL_AGENTS for e in starts)
 
 
 @patch("agents.run_structured_agent")
 @patch("agents.run_agent")
 def test_run_debate_feeds_researcher_into_sub_agents(mock_text, mock_struct):
-    mock_text.side_effect = lambda system, user, **kw: (
-        "Current price: $180. RESEARCHER_OUTPUT" if "research" in system.lower()
-        else f"PROMPT_CONTAINED:{int('RESEARCHER_OUTPUT' in user)}"
-    )
+    def _mock(system, user, **kw):
+        # The researcher is the only caller that passes tools=["WebSearch"].
+        if kw.get("tools") == ["WebSearch"]:
+            return "Current price: $180. RESEARCHER_OUTPUT"
+        return f"PROMPT_CONTAINED:{int('RESEARCHER_OUTPUT' in user)}"
+    mock_text.side_effect = _mock
     mock_struct.side_effect = [
         {"clashPoints": [], "winner": "BULL", "verdict": 7, "summary": "ok"},
         {
@@ -241,8 +247,11 @@ def test_run_debate_feeds_researcher_into_sub_agents(mock_text, mock_struct):
 
     events = list(agents.run_debate("AAPL", notes=""))
     completes = {e["key"]: e["text"] for e in events if e["type"] == "agent_complete"}
-    # Every non-researcher text agent must have seen the researcher output in its prompt
-    for key in AGENT_SEQUENCE[1:13]:  # 12 specialists
+    # Every specialist (indices 2..13) must have seen the researcher context in
+    # its user prompt. The researcher and fact_checker both call WebSearch so
+    # they get the researcher-sentinel response back from the mock — that's
+    # expected, they're the ones producing the context.
+    for key in AGENT_SEQUENCE[2:14]:  # 12 specialists only
         assert completes[key] == "PROMPT_CONTAINED:1", f"{key} did not receive researcher context"
 
 
@@ -274,6 +283,8 @@ def test_run_debate_assembles_data_model(mock_text, mock_struct):
     assert set(final["bear"].keys()) == {
         "risk", "valuation", "headwinds", "disruption", "accounting", "technicals"
     }
+    assert final["headBull"] == "stub"
+    assert final["headBear"] == "stub"
     assert final["clash"] == clash
     assert final["priceTarget"] == pt
     # timestamp is ISO-8601 string
@@ -284,7 +295,7 @@ def test_run_debate_assembles_data_model(mock_text, mock_struct):
 @patch("agents.run_agent")
 def test_run_debate_survives_researcher_failure(mock_text, mock_struct):
     def flaky_text(system, user, **kw):
-        if "research" in system.lower():
+        if kw.get("tools") == ["WebSearch"]:
             raise agents.AgentError("WebSearch unavailable")
         return "analyst stub"
     mock_text.side_effect = flaky_text

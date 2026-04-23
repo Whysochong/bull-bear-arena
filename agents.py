@@ -20,9 +20,11 @@ SPECIALIST_CONCURRENCY = 12  # all 12 specialist agents run in parallel (6 bull 
 _MD_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
 # Ordered pipeline. Each entry: (event_key, label, kind, bucket_path)
-# kind in {"research", "analyst_bull", "analyst_bear", "judge", "price_target"}
+# kind in {"research", "fact_check", "analyst_bull", "analyst_bear",
+#          "head_bull", "head_bear", "judge", "price_target"}
 _PIPELINE: list[tuple[str, str, str, tuple[str, ...]]] = [
     ("researcher",         "🔎 Researching…",                  "research",     ("researcher",)),
+    ("fact_checker",       "✅ Fact-checking…",                "fact_check",   ("researcher",)),
     ("bull_fundamentals",  "📊 Bull Fundamentals…",            "analyst_bull", ("bull", "fundamentals")),
     ("bull_growth",        "🚀 Bull Growth Catalysts…",        "analyst_bull", ("bull", "growth")),
     ("bull_macro",         "🌍 Bull Macro Tailwinds…",         "analyst_bull", ("bull", "macro")),
@@ -35,6 +37,8 @@ _PIPELINE: list[tuple[str, str, str, tuple[str, ...]]] = [
     ("bear_disruption",    "🎯 Bear Disruption…",              "analyst_bear", ("bear", "disruption")),
     ("bear_accounting",    "🚩 Bear Accounting & Sentiment…",  "analyst_bear", ("bear", "accounting")),
     ("bear_technicals",    "📉 Bear Technicals…",              "analyst_bear", ("bear", "technicals")),
+    ("head_bull",          "👔 Head Bull synthesizing…",       "head_bull",    ("headBull",)),
+    ("head_bear",          "👔 Head Bear synthesizing…",       "head_bear",    ("headBear",)),
     ("judge",              "⚖️ Judging…",                      "judge",        ("clash",)),
     ("price_target",       "🎯 Building price target…",        "price_target", ("priceTarget",)),
 ]
@@ -183,6 +187,17 @@ def _researcher_prompt(ticker: str, notes: str) -> str:
     )
 
 
+def _fact_checker_prompt(ticker: str, researcher_text: str) -> str:
+    today = datetime.now().date().isoformat()
+    return (
+        f"Ticker: {ticker}\n"
+        f"Date: {today}\n\n"
+        f"Researcher's draft brief:\n\n{researcher_text}\n\n"
+        f"Verify every numeric claim above using WebSearch. Return the revised "
+        f"brief as instructed."
+    )
+
+
 def _analyst_prompt(ticker: str, notes: str, researcher_text: str, side: str) -> str:
     today = datetime.now().date().isoformat()
     notes_block = f"\nUser notes: {notes}\n" if notes.strip() else ""
@@ -195,31 +210,37 @@ def _analyst_prompt(ticker: str, notes: str, researcher_text: str, side: str) ->
     )
 
 
-def _judge_prompt(ticker: str, bull: dict[str, str], bear: dict[str, str]) -> str:
+def _head_prompt(ticker: str, side_specialists: dict[str, str], side: str) -> str:
     today = datetime.now().date().isoformat()
-    bull_block = "\n\n".join(f"{k.upper()}: {v}" for k, v in bull.items())
-    bear_block = "\n\n".join(f"{k.upper()}: {v}" for k, v in bear.items())
+    block = "\n\n".join(f"=== {k.upper()} ===\n{v}" for k, v in side_specialists.items())
     return (
         f"Ticker: {ticker}\nDate: {today}\n\n"
-        f"=== BULL ANALYSES ===\n{bull_block}\n\n"
-        f"=== BEAR ANALYSES ===\n{bear_block}\n\n"
+        f"Here are the six {side} specialist analyses:\n\n{block}\n\n"
+        f"Synthesize them into your unified lead {side} advocacy brief as instructed."
+    )
+
+
+def _judge_prompt(ticker: str, head_bull: str, head_bear: str) -> str:
+    today = datetime.now().date().isoformat()
+    return (
+        f"Ticker: {ticker}\nDate: {today}\n\n"
+        f"=== LEAD BULL ADVOCATE ===\n{head_bull}\n\n"
+        f"=== LEAD BEAR ADVOCATE ===\n{head_bear}\n\n"
         f"Produce the clash JSON."
     )
 
 
 def _price_target_prompt(
     ticker: str, researcher_text: str,
-    bull: dict[str, str], bear: dict[str, str],
+    head_bull: str, head_bear: str,
     clash: dict,
 ) -> str:
     today = datetime.now().date().isoformat()
-    bull_block = "\n\n".join(f"{k.upper()}: {v}" for k, v in bull.items())
-    bear_block = "\n\n".join(f"{k.upper()}: {v}" for k, v in bear.items())
     return (
         f"Ticker: {ticker}\nDate: {today}\n\n"
         f"Researcher brief: {researcher_text}\n\n"
-        f"=== BULL ANALYSES ===\n{bull_block}\n\n"
-        f"=== BEAR ANALYSES ===\n{bear_block}\n\n"
+        f"=== LEAD BULL ADVOCATE ===\n{head_bull}\n\n"
+        f"=== LEAD BEAR ADVOCATE ===\n{head_bear}\n\n"
         f"=== JUDGE VERDICT ===\n"
         f"Winner: {clash.get('winner', '?')}  Score: {clash.get('verdict', '?')}/10\n"
         f"Summary: {clash.get('summary', '')}\n\n"
@@ -232,11 +253,14 @@ def _price_target_prompt(
 # ---------------------------------------------------------------------------
 
 def run_debate(ticker: str, notes: str = ""):
-    """Generator: run the full 15-agent pipeline, yielding progress events.
+    """Generator: run the full 17-agent pipeline, yielding progress events.
 
-    Phases: (1) researcher sequential with WebSearch, (2) 12 specialists in
-    parallel via ThreadPoolExecutor (up to SPECIALIST_CONCURRENCY at a time),
-    (3) judge sequential, (4) price target sequential.
+    Phases:
+      1. Researcher (sequential, WebSearch)
+      2. 12 specialists in parallel (SPECIALIST_CONCURRENCY workers)
+      3. Head Bull + Head Bear in parallel (synthesize their side's specialists)
+      4. Judge (reads the two head briefs only)
+      5. Price target (reads researcher + heads + judge verdict)
 
     Final event is {'type': 'debate_complete', 'debate': {...}}.
     """
@@ -248,6 +272,8 @@ def run_debate(ticker: str, notes: str = ""):
         "researcher": "",
         "bull": {},
         "bear": {},
+        "headBull": "",
+        "headBear": "",
         "clash": {},
         "priceTarget": {},
     }
@@ -276,14 +302,30 @@ def run_debate(ticker: str, notes: str = ""):
     yield {"type": "agent_complete", "key": r_key, "text": researcher_text,
            "step": r_step, "total": total}
 
+    # --- Phase 1b: Fact-checker (sequential, WebSearch) ------------------
+    fc_key, fc_label, _, _ = _PIPELINE[1]
+    fc_step = _bump_step()
+    yield {"type": "agent_start", "key": fc_key, "label": fc_label,
+           "step": fc_step, "total": total}
+    try:
+        fact_checked = run_agent(
+            _prompts.SYSTEM_PROMPTS[fc_key],
+            _fact_checker_prompt(ticker, researcher_text),
+            tools=["WebSearch"],
+        )
+        debate["researcher"] = fact_checked  # vetted version replaces raw
+    except AgentError as e:
+        # Fact-checker failure is non-fatal — keep the raw researcher text
+        fact_checked = f"(fact-checker failed: {e}) — using raw researcher brief below:\n\n{researcher_text}"
+    yield {"type": "agent_complete", "key": fc_key, "text": fact_checked,
+           "step": fc_step, "total": total}
+
     # --- Phase 2: 12 specialists in parallel -----------------------------
     specialist_entries = [
         entry for entry in _PIPELINE
         if entry[2] in ("analyst_bull", "analyst_bear")
     ]
     specialist_steps: dict[str, int] = {}
-    # Emit every specialist's agent_start up front so the UI can flip them all
-    # to "running" before the thread pool starts blocking.
     for key, label, _kind, _path in specialist_entries:
         specialist_steps[key] = _bump_step()
         yield {"type": "agent_start", "key": key, "label": label,
@@ -308,21 +350,54 @@ def run_debate(ticker: str, notes: str = ""):
             yield {"type": "agent_complete", "key": key, "text": text,
                    "step": specialist_steps[key], "total": total}
 
-    # --- Phase 3: Judge (sequential, depends on all specialists) ---------
+    # --- Phase 3: Head Bull + Head Bear in parallel ----------------------
+    head_entries = [
+        entry for entry in _PIPELINE
+        if entry[2] in ("head_bull", "head_bear")
+    ]
+    head_steps: dict[str, int] = {}
+    for key, label, _kind, _path in head_entries:
+        head_steps[key] = _bump_step()
+        yield {"type": "agent_start", "key": key, "label": label,
+               "step": head_steps[key], "total": total}
+
+    def _run_head(entry):
+        key, _label, kind, path = entry
+        if kind == "head_bull":
+            side_dict, side = debate["bull"], "bull"
+        else:
+            side_dict, side = debate["bear"], "bear"
+        text = run_agent(
+            _prompts.SYSTEM_PROMPTS[key],
+            _head_prompt(ticker, side_dict, side),
+        )
+        return key, path, text
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {pool.submit(_run_head, entry): entry[0]
+                   for entry in head_entries}
+        for fut in as_completed(futures):
+            key, path, text = fut.result()
+            (field,) = path
+            debate[field] = text
+            yield {"type": "agent_complete", "key": key, "text": text,
+                   "step": head_steps[key], "total": total}
+
+    # --- Phase 4: Judge (sequential, reads the two head briefs) ----------
     j_key, j_label, _, _ = _PIPELINE[-2]
     j_step = _bump_step()
     yield {"type": "agent_start", "key": j_key, "label": j_label,
            "step": j_step, "total": total}
     clash = run_structured_agent(
         _prompts.SYSTEM_PROMPTS[j_key],
-        _judge_prompt(ticker, debate["bull"], debate["bear"]),
+        _judge_prompt(ticker, debate["headBull"], debate["headBear"]),
         schema=_prompts.JUDGE_SCHEMA,
     )
     debate["clash"] = clash
     yield {"type": "agent_complete", "key": j_key, "text": json.dumps(clash),
            "step": j_step, "total": total}
 
-    # --- Phase 4: Price target (sequential, depends on judge) ------------
+    # --- Phase 5: Price target (sequential, depends on judge) ------------
     p_key, p_label, _, _ = _PIPELINE[-1]
     p_step = _bump_step()
     yield {"type": "agent_start", "key": p_key, "label": p_label,
@@ -331,7 +406,7 @@ def run_debate(ticker: str, notes: str = ""):
         _prompts.SYSTEM_PROMPTS[p_key],
         _price_target_prompt(
             ticker, debate["researcher"],
-            debate["bull"], debate["bear"], debate["clash"],
+            debate["headBull"], debate["headBear"], debate["clash"],
         ),
         schema=_prompts.PRICE_TARGET_SCHEMA,
     )

@@ -1,13 +1,14 @@
 import prompts
 
 
-def test_all_15_personas_defined():
+def test_all_18_personas_defined():
     expected = {
-        "researcher",
+        "researcher", "fact_checker",
         "bull_fundamentals", "bull_growth", "bull_macro",
         "bull_moat", "bull_capital", "bull_technicals",
         "bear_risk", "bear_valuation", "bear_headwinds",
         "bear_disruption", "bear_accounting", "bear_technicals",
+        "head_bull", "head_bear",
         "judge", "price_target",
     }
     assert set(prompts.SYSTEM_PROMPTS.keys()) == expected
