@@ -105,7 +105,7 @@ _ALL_AGENT_KEYS = (
     ["researcher", "fact_checker"]
     + [k for k, _ in _GRID_BULL]
     + [k for k, _ in _GRID_BEAR]
-    + ["head_bull", "head_bear", "judge", "price_target"]
+    + ["head_bull", "head_bear", "price_target", "judge"]
 )
 
 
@@ -132,8 +132,8 @@ def _render_status_grid(placeholder, states: dict[str, str]) -> None:
         col_hb.markdown(f"{_agent_icon(states['head_bull'])} 👔 **Head Bull** (synthesis)")
         col_hr.markdown(f"{_agent_icon(states['head_bear'])} 👔 **Head Bear** (synthesis)")
         st.markdown("---")
-        st.markdown(f"{_agent_icon(states['judge'])} ⚖️ **Judge**")
-        st.markdown(f"{_agent_icon(states['price_target'])} 🎯 **Price Target**")
+        st.markdown(f"{_agent_icon(states['price_target'])} 🎯 **Price Target** (quant analyst — feeds the judge)")
+        st.markdown(f"{_agent_icon(states['judge'])} ⚖️ **Judge** (reads heads + price target → final verdict)")
 
 
 def render_running() -> None:

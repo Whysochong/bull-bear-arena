@@ -90,8 +90,8 @@ _PIPELINE: list[tuple[str, str, str, tuple[str, ...]]] = [
     ("bear_technicals",    "📉 Bear Technicals…",              "analyst_bear", ("bear", "technicals")),
     ("head_bull",          "👔 Head Bull synthesizing…",       "head_bull",    ("headBull",)),
     ("head_bear",          "👔 Head Bear synthesizing…",       "head_bear",    ("headBear",)),
-    ("judge",              "⚖️ Judging…",                      "judge",        ("clash",)),
     ("price_target",       "🎯 Building price target…",        "price_target", ("priceTarget",)),
+    ("judge",              "⚖️ Judging…",                      "judge",        ("clash",)),
 ]
 
 
@@ -271,20 +271,9 @@ def _head_prompt(ticker: str, side_specialists: dict[str, str], side: str) -> st
     )
 
 
-def _judge_prompt(ticker: str, head_bull: str, head_bear: str) -> str:
-    today = datetime.now().date().isoformat()
-    return (
-        f"Ticker: {ticker}\nDate: {today}\n\n"
-        f"=== LEAD BULL ADVOCATE ===\n{head_bull}\n\n"
-        f"=== LEAD BEAR ADVOCATE ===\n{head_bear}\n\n"
-        f"Produce the clash JSON."
-    )
-
-
 def _price_target_prompt(
     ticker: str, researcher_text: str,
     head_bull: str, head_bear: str,
-    clash: dict,
 ) -> str:
     today = datetime.now().date().isoformat()
     return (
@@ -292,10 +281,38 @@ def _price_target_prompt(
         f"Researcher brief: {researcher_text}\n\n"
         f"=== LEAD BULL ADVOCATE ===\n{head_bull}\n\n"
         f"=== LEAD BEAR ADVOCATE ===\n{head_bear}\n\n"
-        f"=== JUDGE VERDICT ===\n"
-        f"Winner: {clash.get('winner', '?')}  Score: {clash.get('verdict', '?')}/10\n"
-        f"Summary: {clash.get('summary', '')}\n\n"
-        f"Produce the price target JSON."
+        f"Produce the price target JSON. Use the current share price from the "
+        f"researcher brief as `currentPrice`."
+    )
+
+
+def _judge_prompt(
+    ticker: str, head_bull: str, head_bear: str, price_target: dict,
+) -> str:
+    today = datetime.now().date().isoformat()
+    current = price_target.get("currentPrice", "?")
+    ev = price_target.get("expectedValue", "?")
+    bull_case = price_target.get("bullCase", {})
+    base_case = price_target.get("baseCase", {})
+    bear_case = price_target.get("bearCase", {})
+    pt_block = (
+        f"Current price: {current}\n"
+        f"Expected value (12mo): {ev}\n"
+        f"Bull case: price={bull_case.get('price', '?')} "
+        f"prob={bull_case.get('probability', '?')} — {bull_case.get('reasoning', '')}\n"
+        f"Base case: price={base_case.get('price', '?')} "
+        f"prob={base_case.get('probability', '?')} — {base_case.get('reasoning', '')}\n"
+        f"Bear case: price={bear_case.get('price', '?')} "
+        f"prob={bear_case.get('probability', '?')} — {bear_case.get('reasoning', '')}\n"
+        f"Methodology: {price_target.get('methodology', '')}"
+    )
+    return (
+        f"Ticker: {ticker}\nDate: {today}\n\n"
+        f"=== LEAD BULL ADVOCATE ===\n{head_bull}\n\n"
+        f"=== LEAD BEAR ADVOCATE ===\n{head_bear}\n\n"
+        f"=== PRICE TARGET (from your quant analyst) ===\n{pt_block}\n\n"
+        f"Produce the clash + verdict JSON. Your score must be consistent "
+        f"with the price target per the rules in your system prompt."
     )
 
 
@@ -434,22 +451,8 @@ def run_debate(ticker: str, notes: str = ""):
             yield _tee(ticker, {"type": "agent_complete", "key": key, "text": text,
                                 "step": head_steps[key], "total": total})
 
-    # --- Phase 4: Judge (sequential, reads the two head briefs) ----------
-    j_key, j_label, _, _ = _PIPELINE[-2]
-    j_step = _bump_step()
-    yield _tee(ticker, {"type": "agent_start", "key": j_key, "label": j_label,
-                        "step": j_step, "total": total})
-    clash = run_structured_agent(
-        _prompts.SYSTEM_PROMPTS[j_key],
-        _judge_prompt(ticker, debate["headBull"], debate["headBear"]),
-        schema=_prompts.JUDGE_SCHEMA,
-    )
-    debate["clash"] = clash
-    yield _tee(ticker, {"type": "agent_complete", "key": j_key, "text": json.dumps(clash),
-                        "step": j_step, "total": total})
-
-    # --- Phase 5: Price target (sequential, depends on judge) ------------
-    p_key, p_label, _, _ = _PIPELINE[-1]
+    # --- Phase 4: Price target (sequential, reads the two head briefs) ---
+    p_key, p_label, _, _ = _PIPELINE[-2]
     p_step = _bump_step()
     yield _tee(ticker, {"type": "agent_start", "key": p_key, "label": p_label,
                         "step": p_step, "total": total})
@@ -457,12 +460,26 @@ def run_debate(ticker: str, notes: str = ""):
         _prompts.SYSTEM_PROMPTS[p_key],
         _price_target_prompt(
             ticker, debate["researcher"],
-            debate["headBull"], debate["headBear"], debate["clash"],
+            debate["headBull"], debate["headBear"],
         ),
         schema=_prompts.PRICE_TARGET_SCHEMA,
     )
     debate["priceTarget"] = pt
     yield _tee(ticker, {"type": "agent_complete", "key": p_key, "text": json.dumps(pt),
                         "step": p_step, "total": total})
+
+    # --- Phase 5: Judge (sequential, reads the heads + the price target) -
+    j_key, j_label, _, _ = _PIPELINE[-1]
+    j_step = _bump_step()
+    yield _tee(ticker, {"type": "agent_start", "key": j_key, "label": j_label,
+                        "step": j_step, "total": total})
+    clash = run_structured_agent(
+        _prompts.SYSTEM_PROMPTS[j_key],
+        _judge_prompt(ticker, debate["headBull"], debate["headBear"], pt),
+        schema=_prompts.JUDGE_SCHEMA,
+    )
+    debate["clash"] = clash
+    yield _tee(ticker, {"type": "agent_complete", "key": j_key, "text": json.dumps(clash),
+                        "step": j_step, "total": total})
 
     yield _tee(ticker, {"type": "debate_complete", "debate": debate})

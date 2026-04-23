@@ -178,29 +178,31 @@ AGENT_SEQUENCE = [
     "bear_risk", "bear_valuation", "bear_headwinds",
     "bear_disruption", "bear_accounting", "bear_technicals",
     "head_bull", "head_bear",
-    "judge", "price_target",
+    "price_target", "judge",
 ]
 SPECIALIST_KEYS = set(AGENT_SEQUENCE[2:14])
 HEAD_KEYS = {"head_bull", "head_bear"}
 TOTAL_AGENTS = 18
+
+_PT_MOCK = {
+    "currentPrice": 100.0,
+    "bullCase": {"price": 120, "probability": 0.3, "reasoning": "r1"},
+    "baseCase": {"price": 110, "probability": 0.5, "reasoning": "r2"},
+    "bearCase": {"price": 90,  "probability": 0.2, "reasoning": "r3"},
+    "expectedValue": 109.0,
+    "timeHorizon": "12 months",
+    "methodology": "multiples",
+}
+_CLASH_MOCK = {"clashPoints": [], "winner": "BULL", "verdict": 7, "summary": "ok"}
 
 
 @patch("agents.run_structured_agent")
 @patch("agents.run_agent")
 def test_run_debate_emits_all_events(mock_text, mock_struct):
     mock_text.return_value = "stub analysis"
-    mock_struct.side_effect = [
-        {"clashPoints": [], "winner": "BULL", "verdict": 7, "summary": "ok"},
-        {
-            "currentPrice": 100.0,
-            "bullCase": {"price": 120, "probability": 0.3, "reasoning": "r1"},
-            "baseCase": {"price": 110, "probability": 0.5, "reasoning": "r2"},
-            "bearCase": {"price": 90,  "probability": 0.2, "reasoning": "r3"},
-            "expectedValue": 109.0,
-            "timeHorizon": "12 months",
-            "methodology": "multiples",
-        },
-    ]
+    # Price target runs BEFORE judge now, so the structured side_effects come
+    # in that order too.
+    mock_struct.side_effect = [_PT_MOCK, _CLASH_MOCK]
 
     events = list(agents.run_debate("AAPL", notes=""))
     starts = [e for e in events if e["type"] == "agent_start"]
@@ -210,13 +212,13 @@ def test_run_debate_emits_all_events(mock_text, mock_struct):
     # agent_start events: in declaration order
     assert [e["key"] for e in starts] == AGENT_SEQUENCE
     # agent_complete order: researcher, fact_checker, then specialists (any
-    # order), then heads (any order), then judge, then price_target.
+    # order), then heads (any order), then price_target, then judge.
     assert completes[0]["key"] == "researcher"
     assert completes[1]["key"] == "fact_checker"
     assert {e["key"] for e in completes[2:14]} == SPECIALIST_KEYS
     assert {e["key"] for e in completes[14:16]} == HEAD_KEYS
-    assert completes[16]["key"] == "judge"
-    assert completes[17]["key"] == "price_target"
+    assert completes[16]["key"] == "price_target"
+    assert completes[17]["key"] == "judge"
 
     assert len(finals) == 1
     assert sorted(e["step"] for e in starts) == list(range(1, TOTAL_AGENTS + 1))
@@ -232,8 +234,8 @@ def test_run_debate_feeds_researcher_into_sub_agents(mock_text, mock_struct):
             return "Current price: $180. RESEARCHER_OUTPUT"
         return f"PROMPT_CONTAINED:{int('RESEARCHER_OUTPUT' in user)}"
     mock_text.side_effect = _mock
+    # Price target runs first, then judge.
     mock_struct.side_effect = [
-        {"clashPoints": [], "winner": "BULL", "verdict": 7, "summary": "ok"},
         {
             "currentPrice": 180.0,
             "bullCase": {"price": 200, "probability": 0.3, "reasoning": "r"},
@@ -243,6 +245,7 @@ def test_run_debate_feeds_researcher_into_sub_agents(mock_text, mock_struct):
             "timeHorizon": "12 months",
             "methodology": "m",
         },
+        {"clashPoints": [], "winner": "BULL", "verdict": 7, "summary": "ok"},
     ]
 
     events = list(agents.run_debate("AAPL", notes=""))
@@ -269,7 +272,8 @@ def test_run_debate_assembles_data_model(mock_text, mock_struct):
         "timeHorizon": "12 months",
         "methodology": "m",
     }
-    mock_struct.side_effect = [clash, pt]
+    # Price target runs first, then judge.
+    mock_struct.side_effect = [pt, clash]
 
     events = list(agents.run_debate("TSLA", notes="heads up: earnings next week"))
     final = [e for e in events if e["type"] == "debate_complete"][0]["debate"]
@@ -299,8 +303,8 @@ def test_run_debate_survives_researcher_failure(mock_text, mock_struct):
             raise agents.AgentError("WebSearch unavailable")
         return "analyst stub"
     mock_text.side_effect = flaky_text
+    # Price target runs first, then judge.
     mock_struct.side_effect = [
-        {"clashPoints": [], "winner": "BULL", "verdict": 7, "summary": "ok"},
         {
             "currentPrice": 0,
             "bullCase": {"price": 10, "probability": 0.3, "reasoning": "r"},
@@ -310,6 +314,7 @@ def test_run_debate_survives_researcher_failure(mock_text, mock_struct):
             "timeHorizon": "12 months",
             "methodology": "m",
         },
+        {"clashPoints": [], "winner": "BULL", "verdict": 7, "summary": "ok"},
     ]
 
     events = list(agents.run_debate("NVDA", notes=""))
